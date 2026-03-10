@@ -123,17 +123,31 @@ class CiahoGui(tk.Tk):
             cursor="hand2",
         ).pack(side="left", padx=(0, 8))
 
-        tk.Label(uf, text="Głębokość:", bg=C_SURFACE, fg=C_TEXT,
-                 font=("Segoe UI", 9)).pack(side="left")
+        _DEPTH_LEGEND = (
+            "Crawl depth:  how many pages are visited per scenario\n"
+            "  1 – homepage only  (fastest)\n"
+            "  2 – homepage + 1 internal link\n"
+            "  3 – homepage + 2 internal links\n"
+            "  4 – homepage + 3 internal links\n"
+            "  5 – homepage + 4 internal links  (slowest, most thorough)"
+        )
+        depth_lbl = tk.Label(uf, text="Depth:", bg=C_SURFACE, fg=C_TEXT,
+                             font=("Segoe UI", 9), cursor="question_arrow")
+        depth_lbl.pack(side="left")
         self._crawl_depth = tk.IntVar(value=1)
-        tk.Spinbox(
+        depth_spin = tk.Spinbox(
             uf, from_=1, to=5, width=2,
             textvariable=self._crawl_depth,
             font=("Segoe UI", 9),
             bg=C_MANTLE, fg=C_TEXT,
             buttonbackground=C_SURFACE,
             relief="flat", bd=0,
-        ).pack(side="left", padx=(2, 12))
+        )
+        depth_spin.pack(side="left", padx=(2, 12))
+        # Tooltip on both label and spinbox
+        for _w in (depth_lbl, depth_spin):
+            _w.bind("<Enter>", lambda e, msg=_DEPTH_LEGEND: self._show_tooltip(e, msg))
+            _w.bind("<Leave>", lambda e: self._hide_tooltip())
 
         self._btn = tk.Button(
             uf, text="▶  Analyze", command=self._go,
@@ -274,6 +288,31 @@ class CiahoGui(tk.Tk):
         if s[:1] in "═─╔╚║╠╝╗":
             return "yellow"
         return "normal"
+
+    # ── Tooltip ──────────────────────────────
+
+    def _show_tooltip(self, event, text: str):
+        self._hide_tooltip()
+        tip = tk.Toplevel(self)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 16}")
+        tk.Label(
+            tip, text=text, justify="left",
+            bg="#2a2a3d", fg="#cdd6f4",
+            font=("Segoe UI", 9),
+            relief="flat", bd=0,
+            padx=10, pady=7,
+        ).pack()
+        self._tooltip_win = tip
+
+    def _hide_tooltip(self, *_):
+        win = getattr(self, "_tooltip_win", None)
+        if win:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+        self._tooltip_win = None
 
     def _log(self, text: str, hint: str = "normal"):
         self._term.configure(state="normal")
@@ -447,7 +486,7 @@ class CiahoGui(tk.Tk):
         elif len(ok_batch) > 1:
             # ── Multiple sites: combined overview (+optional per-site tabs) ───
             ct = tk.Frame(self._nb, bg=C_BASE)
-            self._nb.add(ct, text="  📊  Porównanie  ")
+            self._nb.add(ct, text="  📊  Comparison  ")
             self._combined_tab(ct, ok_batch)
 
             if self._show_individual.get():
