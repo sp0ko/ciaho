@@ -1748,6 +1748,61 @@ class CookieAnalyzer:
                     pass
         return None
 
+    def _disable_all_switches(self, driver) -> int:
+        """
+        In a consent preference panel, flip all ON toggle switches to OFF.
+        Works on <input type="checkbox">, role="switch", and common CSS-class
+        toggles.  Returns number of switches turned OFF.
+        """
+        disabled = 0
+        try:
+            # 1. <input type="checkbox" checked> that are visible and not disabled
+            for inp in driver.find_elements(By.CSS_SELECTOR,
+                    'input[type="checkbox"]:checked:not([disabled])'):
+                try:
+                    if inp.is_displayed():
+                        # Skip "select all" / "necessary" master checkboxes
+                        lbl = (inp.get_attribute("aria-label") or "").lower()
+                        name = (inp.get_attribute("name") or "").lower()
+                        if any(kw in lbl + name for kw in
+                               ["necessary", "required", "essential", "functional"]):
+                            continue
+                        driver.execute_script("arguments[0].click();", inp)
+                        disabled += 1
+                        time.sleep(0.1)
+                except Exception:
+                    continue
+
+            # 2. role="switch" aria-checked="true"
+            for sw in driver.find_elements(By.CSS_SELECTOR,
+                    '[role="switch"][aria-checked="true"]'):
+                try:
+                    if sw.is_displayed():
+                        lbl = (sw.get_attribute("aria-label") or "").lower()
+                        if any(kw in lbl for kw in
+                               ["necessary", "required", "essential", "functional"]):
+                            continue
+                        driver.execute_script("arguments[0].click();", sw)
+                        disabled += 1
+                        time.sleep(0.1)
+                except Exception:
+                    continue
+
+            # 3. Common toggle classes (e.g. Cookieyes, OneTrust, Cookiebot)
+            for sw in driver.find_elements(By.CSS_SELECTOR,
+                    '.ot-switch input:checked, .cli-switch input:checked, '
+                    '.cookieyes-switch input:checked, [class*="toggle"] input:checked'):
+                try:
+                    if sw.is_displayed():
+                        driver.execute_script("arguments[0].click();", sw)
+                        disabled += 1
+                        time.sleep(0.1)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return disabled
+
     def _find_consent_button(self, driver, selectors: list, text_patterns: list):
         """Try 5 escalating strategies to find a consent button."""
         # 1. CSS selectors on main document
@@ -2005,6 +2060,9 @@ class CookieAnalyzer:
             "new_cookies": [],   # cookies set AFTER consent click (delta)
             "html": "",
             "consent_found": False,
+            "local_storage": {},      # window.localStorage snapshot after consent
+            "session_storage": {},    # window.sessionStorage snapshot after consent
+            "local_storage_pre": {},  # snapshot BEFORE consent click
         }
 
         def _click(btn) -> bool:
@@ -2045,6 +2103,13 @@ class CookieAnalyzer:
             pre_consent_cookie_names: set[str] = {
                 c["name"] for c in driver.get_cookies()
             }
+            # localStorage snapshot BEFORE consent click
+            try:
+                result["local_storage_pre"] = driver.execute_script(
+                    "return Object.fromEntries(Object.entries(localStorage));"
+                ) or {}
+            except Exception:
+                result["local_storage_pre"] = {}
 
             if action == "accept":
                 btn = self._find_consent_button(
@@ -2076,6 +2141,10 @@ class CookieAnalyzer:
                         print("    [+] Opened preferences panel – looking for reject...")
                         _click(mgr)
                         time.sleep(2)
+                        # ── Point 6: disable all non-necessary switches ────────
+                        n_off = self._disable_all_switches(driver)
+                        if n_off:
+                            print(f"    [+] Disabled {n_off} consent toggle(s) in panel")
                         btn2 = self._find_consent_button(
                             driver, REJECT_SELECTORS, REJECT_TEXT_PATTERNS
                         )
@@ -2115,6 +2184,10 @@ class CookieAnalyzer:
                         print("    [+] Opened preferences panel – looking for necessary...")
                         _click(mgr)
                         time.sleep(2)
+                        # ── Point 6: disable all non-necessary switches ────────
+                        n_off = self._disable_all_switches(driver)
+                        if n_off:
+                            print(f"    [+] Disabled {n_off} consent toggle(s) in panel")
                         btn2 = self._find_consent_button(
                             driver, NECESSARY_SELECTORS, NECESSARY_TEXT_PATTERNS
                         )
@@ -2136,16 +2209,18 @@ class CookieAnalyzer:
                             if _click(btn):
                                 result["consent_found"] = True
 
-            # ── Screenshot when banner was not found (debug aid) ─────────────
-            if not result["consent_found"]:
-                try:
-                    shot_path = os.path.join(
-                        self.output_dir, f"screenshot_{label}_no_consent.png"
-                    )
-                    driver.save_screenshot(shot_path)
+            # ── Screenshot: save after every scenario (visual evidence) ────────
+            try:
+                shot_path = os.path.join(
+                    self.output_dir, f"screenshot_{label}.png"
+                )
+                driver.save_screenshot(shot_path)
+                if not result["consent_found"]:
                     print(f"    [~] Consent NOT found – screenshot saved: {shot_path}")
-                except Exception as _se:
-                    print(f"    [~] Could not save screenshot: {_se}")
+                else:
+                    print(f"    [~] Screenshot saved: {shot_path}")
+            except Exception as _se:
+                print(f"    [~] Could not save screenshot: {_se}")
 
             # ── Phase 2: reset HAR and capture only post-consent traffic ──────────
             # After the consent decision the site fires (or withholds) trackers.
@@ -2171,12 +2246,49 @@ class CookieAnalyzer:
             ]
             result["har"] = self.proxy.har
 
+            # localStorage / sessionStorage snapshots after consent
+            try:
+                result["local_storage"] = driver.execute_script(
+                    "return Object.fromEntries(Object.entries(localStorage));"
+                ) or {}
+            except Exception:
+                result["local_storage"] = {}
+            try:
+                result["session_storage"] = driver.execute_script(
+                    "return Object.fromEntries(Object.entries(sessionStorage));"
+                ) or {}
+            except Exception:
+                result["session_storage"] = {}
+
             entries = len(result["har"]["log"]["entries"])
             print(
                 f"    Captured {entries} HAR entries | "
                 f"{len(all_cookies)} cookies total | "
                 f"{len(result['new_cookies'])} new after consent"
             )
+
+            # ── Retry if HAR capture is suspiciously thin ─────────────────────
+            # < 5 entries usually means a redirect happened right after reset and
+            # all traffic was missed.  Give the page a second chance with a longer
+            # idle window before accepting the result.
+            if entries < 5:
+                print(f"    [~] Only {entries} HAR entries – retrying capture with longer wait...")
+                self.proxy.new_har(self.url + "#post-consent-retry", options=_har_opts)
+                try:
+                    driver.get(self.url)
+                    time.sleep(3)
+                    self._simulate_page_interaction(driver)
+                except Exception:
+                    pass
+                self._wait_network_idle(timeout=35.0, idle_for=3.0, min_wait=12.0)
+                retry_har = self.proxy.har
+                retry_entries = len(retry_har.get("log", {}).get("entries", []))
+                if retry_entries > entries:
+                    print(f"    [+] Retry captured {retry_entries} entries – using retry HAR")
+                    result["har"] = retry_har
+                    entries = retry_entries
+                else:
+                    print(f"    [~] Retry captured {retry_entries} entries – keeping original")
 
         except Exception as exc:
             print(f"    [!] Error during scenario '{label}': {exc}")
@@ -2310,6 +2422,119 @@ class CookieAnalyzer:
 
     # ── Comparison & reporting ────────────────
 
+    _TRACKING_COOKIE_PATTERNS = re.compile(
+        r"(_ga|_gid|_fbp|_fbc|__utm|_gcl|_gac|ajs_|amplitude|mixpanel"
+        r"|muid|msclkid|_hjid|_hjTLDTest|optimizely|visitor_id|td_|intercom"
+        r"|_pin_unauth|_pinterest|_tq_id|_tt_enable|ttclid)",
+        re.IGNORECASE,
+    )
+
+    def _audit_cookie_attributes(self, cookies: list, scenario: str) -> list:
+        """
+        Inspect cookie security attributes and flag GDPR/ePrivacy issues.
+        Returns a list of {name, domain, issue, severity, article} dicts.
+        """
+        issues = []
+        tracking_cats = {"advertising", "analytics", "social_media"}
+        for c in cookies:
+            name   = c.get("name", "?")
+            domain = c.get("domain", "").lstrip(".")
+            cat    = self._categorize_domain(domain)
+            is_tracker = (cat in tracking_cats
+                          or bool(self._TRACKING_COOKIE_PATTERNS.search(name)))
+            # SameSite=None without Secure → cookie sent cross-site in plaintext
+            same_site = (c.get("sameSite") or "").lower()
+            secure    = bool(c.get("secure", False))
+            http_only = bool(c.get("httpOnly", False))
+
+            if same_site == "none" and not secure:
+                issues.append({
+                    "name": name, "domain": domain, "scenario": scenario,
+                    "issue": "SameSite=None without Secure flag – cookie sent cross-site over HTTP",
+                    "severity": "HIGH",
+                    "article": "Art. 32 GDPR / ePrivacy",
+                })
+            if is_tracker and not http_only:
+                issues.append({
+                    "name": name, "domain": domain, "scenario": scenario,
+                    "issue": "Tracking cookie lacks HttpOnly – readable by JS (XSS risk + GDPR integrity)",
+                    "severity": "MEDIUM",
+                    "article": "Art. 32 GDPR",
+                })
+            if is_tracker and not secure:
+                issues.append({
+                    "name": name, "domain": domain, "scenario": scenario,
+                    "issue": "Tracking cookie lacks Secure flag – may be transmitted over HTTP",
+                    "severity": "MEDIUM",
+                    "article": "Art. 32 GDPR",
+                })
+            # Long-lived tracking cookies (> 13 months – ICO / EDPB guidance)
+            expiry_ts = c.get("expiry")
+            if expiry_ts and is_tracker:
+                try:
+                    days = (datetime.fromtimestamp(float(expiry_ts)) - datetime.now()).days
+                    if days > 395:
+                        issues.append({
+                            "name": name, "domain": domain, "scenario": scenario,
+                            "issue": f"Tracking cookie expires in {days} days (>{395}d EDPB guideline)",
+                            "severity": "LOW",
+                            "article": "Art. 5(1)(e) GDPR (storage limitation)",
+                        })
+                except Exception:
+                    pass
+        return issues
+
+    def _diff_storage(self, pre: dict, post: dict) -> dict:
+        """
+        Return keys added/changed in localStorage after consent.
+        Values are truncated to 120 chars for privacy.
+        """
+        added   = {}
+        changed = {}
+        for k, v in post.items():
+            if k not in pre:
+                added[k] = str(v)[:120]
+            elif pre[k] != v:
+                changed[k] = str(v)[:120]
+        return {"added": added, "changed": changed, "removed": sorted(set(pre) - set(post))}
+
+    def _scan_js_content(self, har: dict) -> list[str]:
+        """
+        Download JS responses from HAR and scan their text content for
+        known tracker SDK init patterns (catches first-party CDN proxies).
+        Returns list of matched pattern strings.
+        """
+        _SDK_PATTERNS = re.compile(
+            r"(googletag\.pubads|gtag\s*\(|ga\s*\(\s*['\"]create|fbq\s*\("
+            r"|_fbq\s*=|amplitude\.getInstance|mixpanel\.init|ga4\s*\("
+            r"|heap\.track|segment\.analytics|rudderanalytics\.load"
+            r"|clarity\s*\(\s*['\"]set|mParticle\.init|fullstory\.com/s/fs\.js"
+            r"|hotjar\.com/c/hotjar|ls\._hjSettings|hj\s*\("
+            r"|prebid\.js|pbjs\.que|window\.pbjs"
+            r"|adsbygoogle\.push|googlesyndication"
+            r"|criteo\.com/js|\.criteo\."
+            r"|connect\.facebook\.net|facebook\.com/tr"
+            r"|\.doubleclick\.net|\.googleadservices\.com"
+            r"|tradedoubler\.com|awin1\.com|linkby\.com)",
+            re.IGNORECASE,
+        )
+        found: set[str] = set()
+        if not har:
+            return []
+        for entry in har.get("log", {}).get("entries", []):
+            try:
+                ct = entry.get("response", {}).get("content", {}).get("mimeType", "")
+                if "javascript" not in ct and "ecmascript" not in ct:
+                    continue
+                text = entry.get("response", {}).get("content", {}).get("text", "") or ""
+                if not text:
+                    continue
+                for m in _SDK_PATTERNS.finditer(text[:50_000]):
+                    found.add(m.group(0).lower().rstrip("(").strip())
+            except Exception:
+                continue
+        return sorted(found)
+
     def _compare_scenarios(self, accept: dict, reject: dict, necessary: dict) -> dict:
         print("\n[*] Comparing scenarios...")
 
@@ -2334,10 +2559,17 @@ class CookieAnalyzer:
         reject_tracking    = {d for d in reject_doms    if self._categorize_domain(d) in tracking_cats}
         necessary_tracking = {d for d in necessary_doms if self._categorize_domain(d) in tracking_cats}
 
-        # Domains that fire tracking requests despite reject/necessary-only consent.
-        # These suggest potential GDPR non-compliance by the site.
-        non_compliant_in_reject    = sorted(reject_tracking    - accept_tracking)
-        non_compliant_in_necessary = sorted(necessary_tracking - accept_tracking)
+        # ── Point 7: use necessary-only as clean baseline ────────────────────
+        # Domains that appear in reject/accept but NOT in necessary are the
+        # ones truly enabled by consent.  Domains in necessary are always-on
+        # (CDN, fonts, etc.) and should not count as consent-triggered trackers.
+        necessary_set = set(necessary_doms.keys())
+        reject_tracking_above_baseline    = reject_tracking    - necessary_set
+        # Non-compliant = trackers active in reject/necessary BEYOND the baseline
+        non_compliant_in_reject    = sorted(
+            (reject_tracking - necessary_set) - (accept_tracking - necessary_set - reject_tracking)
+        )
+        non_compliant_in_necessary = sorted(necessary_tracking)
 
         only_accept_doms    = sorted(set(accept_doms)    - set(reject_doms))
         only_reject_doms    = sorted(set(reject_doms)    - set(accept_doms))
@@ -2361,6 +2593,33 @@ class CookieAnalyzer:
         accept_reqs    = len(accept["har"]["log"]["entries"])    if accept["har"]    else 0
         reject_reqs    = len(reject["har"]["log"]["entries"])    if reject["har"]    else 0
         necessary_reqs = len(necessary["har"]["log"]["entries"]) if necessary["har"] else 0
+
+        # ── Point 1: localStorage / sessionStorage diff ───────────────────────
+        ls_accept   = self._diff_storage(accept.get("local_storage_pre", {}),   accept.get("local_storage", {}))
+        ls_reject   = self._diff_storage(reject.get("local_storage_pre", {}),   reject.get("local_storage", {}))
+        ls_necessary= self._diff_storage(necessary.get("local_storage_pre", {}),necessary.get("local_storage", {}))
+
+        # Keys added to localStorage after reject / necessary that look like trackers
+        _TRACKER_LS_PAT = re.compile(
+            r"(_ga|_fbp|optimizely|amplitude|muid|visitor|session_id"
+            r"|tracking|analytics|ajs_|_hjid|cr-user-id)",
+            re.IGNORECASE,
+        )
+        reject_ls_trackers = [k for k in ls_reject["added"] if _TRACKER_LS_PAT.search(k)]
+        necessary_ls_trackers = [k for k in ls_necessary["added"] if _TRACKER_LS_PAT.search(k)]
+
+        # ── Point 2: JS content scan for SDK inits in first-party scripts ──────
+        print("    [~] Scanning downloaded JS content for tracker SDKs...")
+        accept_sdk_hits    = self._scan_js_content(accept["har"])
+        reject_sdk_hits    = self._scan_js_content(reject["har"])
+        necessary_sdk_hits = self._scan_js_content(necessary["har"])
+
+        # ── Point 5: cookie attribute audit ──────────────────────────────────
+        cookie_attr_issues = (
+            self._audit_cookie_attributes(accept["cookies"],   "accept")
+            + self._audit_cookie_attributes(reject["cookies"],   "reject")
+            + self._audit_cookie_attributes(necessary["cookies"], "necessary")
+        )
 
         return {
             "url": self.url,
@@ -2393,6 +2652,7 @@ class CookieAnalyzer:
                 "only_in_reject":     only_reject_doms,
                 "only_in_necessary":  only_necessary_doms,
                 # Tracking domains active despite reject/necessary: potential non-compliance
+                # (already baseline-subtracted – necessary-always-on domains excluded)
                 "non_compliant_in_reject":    non_compliant_in_reject,
                 "non_compliant_in_necessary": non_compliant_in_necessary,
                 "accept_list":        sorted(accept_doms.keys()),
@@ -2433,8 +2693,27 @@ class CookieAnalyzer:
                 "accept_cookie_details":    self._format_cookie_details(accept["cookies"]),
                 "reject_cookie_details":    self._format_cookie_details(reject["cookies"]),
                 "necessary_cookie_details": self._format_cookie_details(necessary["cookies"]),
+                # Attribute security audit
+                "cookie_attribute_issues": cookie_attr_issues,
             },
             "html": html_diff,
+            # localStorage / sessionStorage deltas
+            "storage": {
+                "accept_localstorage_delta":    ls_accept,
+                "reject_localstorage_delta":    ls_reject,
+                "necessary_localstorage_delta": ls_necessary,
+                "reject_ls_tracker_keys":    reject_ls_trackers,
+                "necessary_ls_tracker_keys": necessary_ls_trackers,
+                "accept_session_storage":    accept.get("session_storage", {}),
+                "reject_session_storage":    reject.get("session_storage", {}),
+                "necessary_session_storage": necessary.get("session_storage", {}),
+            },
+            # JS content scan – tracker SDKs found inside downloaded scripts
+            "js_sdk_hits": {
+                "accept":    accept_sdk_hits,
+                "reject":    reject_sdk_hits,
+                "necessary": necessary_sdk_hits,
+            },
         }
 
     # ── Charts ────────────────────────────────
@@ -3227,6 +3506,108 @@ class CookieAnalyzer:
                     "consent (Art. 7(3) GDPR)."
                 ),
                 [s.split("?")[0][:120] for s in ad_scripts_in_reject[:10]],
+            )
+
+        # ── HIGH: Tracker SDK inits found in JS content after reject ──────────
+        storage = analysis.get("storage", {})
+        js_hits = analysis.get("js_sdk_hits", {})
+        reject_sdk = js_hits.get("reject", [])
+        necessary_sdk = js_hits.get("necessary", [])
+        if reject_sdk:
+            add(
+                "HIGH",
+                "Art. 6 & 7(3) GDPR",
+                "Tracker SDK initialisation found in JavaScript after rejecting consent",
+                (
+                    f"Content of downloaded scripts contains {len(reject_sdk)} known "
+                    "tracker SDK init pattern(s) after consent was rejected. "
+                    "This indicates first-party CDN proxying of third-party trackers "
+                    "and continued tracking without a valid legal basis."
+                ),
+                reject_sdk[:15],
+            )
+        elif necessary_sdk:
+            add(
+                "MEDIUM",
+                "Art. 6 GDPR",
+                "Tracker SDK initialisation found in JavaScript on necessary-only selection",
+                (
+                    f"Content of downloaded scripts contains {len(necessary_sdk)} known "
+                    "tracker SDK init pattern(s) even on necessary-only selection."
+                ),
+                necessary_sdk[:15],
+            )
+
+        # ── HIGH/MEDIUM: Tracking keys added to localStorage after reject ──────
+        reject_ls = storage.get("reject_ls_tracker_keys", [])
+        if reject_ls:
+            add(
+                "HIGH",
+                "Art. 5(1)(b) & Art. 6 GDPR",
+                "Tracking identifiers written to localStorage after rejecting consent",
+                (
+                    f"After rejecting consent, {len(reject_ls)} tracking-related key(s) "
+                    "appeared in window.localStorage. localStorage-based tracking "
+                    "bypasses cookie consent mechanisms and violates purpose limitation "
+                    "(Art. 5(1)(b)) and the legal basis requirement (Art. 6 GDPR)."
+                ),
+                reject_ls[:15],
+            )
+        else:
+            necessary_ls = storage.get("necessary_ls_tracker_keys", [])
+            if necessary_ls:
+                add(
+                    "MEDIUM",
+                    "Art. 5(1)(b) GDPR",
+                    "Tracking identifiers written to localStorage on necessary-only selection",
+                    (
+                        f"After selecting necessary-only, {len(necessary_ls)} tracking-related "
+                        "key(s) were written to window.localStorage."
+                    ),
+                    necessary_ls[:15],
+                )
+
+        # ── MEDIUM/LOW: Cookie attribute security issues ───────────────────────
+        attr_issues = cook.get("cookie_attribute_issues", [])
+        high_attr   = [i for i in attr_issues if i["severity"] == "HIGH"]
+        medium_attr = [i for i in attr_issues if i["severity"] == "MEDIUM"]
+        low_attr    = [i for i in attr_issues if i["severity"] == "LOW"]
+        if high_attr:
+            add(
+                "HIGH",
+                "Art. 32 GDPR / ePrivacy",
+                f"Cookie security misconfiguration ({len(high_attr)} issue(s))",
+                (
+                    "One or more cookies use SameSite=None without the Secure flag, "
+                    "allowing them to be transmitted cross-site over unencrypted HTTP. "
+                    "This constitutes a failure to implement appropriate technical measures "
+                    "as required by Art. 32 GDPR."
+                ),
+                [f"{i['name']} @ {i['domain']}: {i['issue']}" for i in high_attr[:8]],
+            )
+        if medium_attr:
+            add(
+                "MEDIUM",
+                "Art. 32 GDPR",
+                f"Tracking cookies missing security attributes ({len(medium_attr)} issue(s))",
+                (
+                    "Tracking cookies lack HttpOnly or Secure flags, increasing the risk of "
+                    "exposure via XSS or unencrypted transmission. "
+                    "Art. 32 GDPR requires appropriate technical security measures."
+                ),
+                [f"{i['name']} @ {i['domain']}: {i['issue']}" for i in medium_attr[:8]],
+            )
+        if low_attr:
+            add(
+                "LOW",
+                "Art. 5(1)(e) GDPR",
+                f"Long-lived tracking cookies ({len(low_attr)} issue(s))",
+                (
+                    "One or more tracking cookies have lifetimes exceeding 13 months. "
+                    "EDPB guidelines and the storage limitation principle (Art. 5(1)(e) GDPR) "
+                    "require that personal data not be kept longer than necessary."
+                ),
+                [f"{i['name']} @ {i['domain']}: {i['issue']}" for i in low_attr[:8]],
             )
 
         counts = Counter(v["severity"] for v in violations)
