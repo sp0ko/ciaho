@@ -43,3 +43,4 @@ typing-extensions>=4.0.0
 #   geckodriver – required when Firefox is selected
 #                Linux: sudo apt install geckodriver
 # ─────────────────────────────────────────────────────────────────────────────
+tldextract>=3.0

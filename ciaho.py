@@ -1884,24 +1884,28 @@ class CookieAnalyzer:
         """Return up to max_links unique same-domain/subdomain hrefs from current page.
 
         Uses driver.current_url as the reference (handles www. redirects) and
-        matches on registered domain so that subdomains like wiadomosci.onet.pl
-        are accepted when scanning onet.pl.
+        matches on registered domain via tldextract so that:
+          - subdomains like wiadomosci.onet.pl match onet.pl
+          - co.uk / com.au / com.pl ccSLDs are handled correctly
         """
         from urllib.parse import urlparse as _up
+        try:
+            import tldextract as _tld
+            def _reg(netloc: str) -> str:
+                e = _tld.extract(netloc.split(":")[0])
+                return f"{e.domain}.{e.suffix}" if e.suffix else e.domain
+        except ImportError:
+            # Fallback: last 2 labels (works for simple TLDs)
+            def _reg(netloc: str) -> str:  # type: ignore[misc]
+                host = netloc.lower().split(":")[0]
+                parts = host.split(".")
+                return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
         # Prefer the actual post-redirect URL over self.url
         try:
             ref_netloc = _up(driver.current_url).netloc or _up(self.url).netloc
         except Exception:
             ref_netloc = _up(self.url).netloc
-
-        # Strip www. and derive registered domain (last two labels, e.g. "onet.pl")
-        def _reg(netloc: str) -> str:
-            host = netloc.lower().lstrip("www.").split(":")[0]
-            parts = host.split(".")
-            # Keep last 2 labels for most domains; handles .co.uk etc. crudely but
-            # good enough for Polish/common TLDs
-            return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
         base_reg = _reg(ref_netloc)
 
