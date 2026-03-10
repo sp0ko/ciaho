@@ -559,8 +559,135 @@ def _build_domain_company_map() -> dict[str, str]:
 DOMAIN_COMPANY: dict[str, str] = _build_domain_company_map()
 
 # ─────────────────────────────────────────────
-#  Cookie consent selectors
+#  Persistent cross-site tracker database
 # ─────────────────────────────────────────────
+
+DB_PATH = os.path.join(_SCRIPT_DIR, "ciaho_db.json")
+
+
+def _company_of_domain(domain: str) -> str:
+    """Module-level helper – returns company name for a domain (uses DOMAIN_COMPANY)."""
+    domain = domain.lower().lstrip(".")
+    if domain in DOMAIN_COMPANY:
+        return DOMAIN_COMPANY[domain]
+    parts = domain.split(".")
+    for i in range(1, len(parts) - 1):
+        parent = ".".join(parts[i:])
+        if parent in DOMAIN_COMPANY:
+            return DOMAIN_COMPANY[parent]
+    return ""
+
+
+def _save_to_db(analysis: dict) -> None:
+    """
+    Append (or update) the scan result in the persistent JSON database.
+    Each site is stored once – rescanning the same domain overwrites the old entry.
+    """
+    try:
+        if os.path.isfile(DB_PATH):
+            with open(DB_PATH, "r", encoding="utf-8") as fh:
+                db = json.load(fh)
+        else:
+            db = {"scans": []}
+
+        dom  = analysis.get("domains", {})
+        tracking_cats = {"advertising", "analytics", "social_media"}
+
+        def _domains_to_companies(domain_list: list) -> list:
+            companies: set = set()
+            for d in domain_list:
+                co = _company_of_domain(d)
+                if co:
+                    companies.add(co)
+            return sorted(companies)
+
+        # Flatten category-bucketed domain dicts into flat lists
+        accept_all  = [d for domains in dom.get("accept_categories",  {}).values() for d in domains]
+        reject_all  = [d for domains in dom.get("reject_categories",  {}).values() for d in domains]
+        accept_trk  = [d for cat, domains in dom.get("accept_categories",  {}).items()
+                       if cat in tracking_cats for d in domains]
+        reject_trk  = [d for cat, domains in dom.get("reject_categories",  {}).items()
+                       if cat in tracking_cats for d in domains]
+        non_compliant = dom.get("non_compliant_in_reject", [])
+
+        netloc = urlparse(analysis.get("url", "")).netloc or analysis.get("url", "")
+
+        entry = {
+            "url":                       analysis.get("url", ""),
+            "netloc":                    netloc,
+            "timestamp":                 analysis.get("timestamp", ""),
+            "privacy_score":             analysis.get("privacy_score", {}).get("score"),
+            "grade":                     analysis.get("privacy_score", {}).get("grade"),
+            "gdpr_risk":                 analysis.get("gdpr", {}).get("overall_risk", "NONE"),
+            "accept_companies":          _domains_to_companies(accept_all),
+            "reject_companies":          _domains_to_companies(reject_all),
+            "tracking_companies_accept": _domains_to_companies(accept_trk),
+            "tracking_companies_reject": _domains_to_companies(reject_trk),
+            "non_compliant_companies":   _domains_to_companies(non_compliant),
+        }
+
+        # Replace existing entry for the same netloc (rerun = update)
+        db["scans"] = [s for s in db["scans"] if s.get("netloc") != netloc]
+        db["scans"].append(entry)
+
+        with open(DB_PATH, "w", encoding="utf-8") as fh:
+            json.dump(db, fh, indent=2, ensure_ascii=False)
+
+        print(f"[+] Scan saved to database ({len(db['scans'])} site(s) total): {DB_PATH}")
+    except Exception as exc:
+        print(f"[WARN] Could not save to database: {exc}")
+
+
+def _print_company_ranking(top_n: int = 25) -> None:
+    """
+    Read ciaho_db.json and print a leaderboard: which companies track users
+    across the most unique sites in the database.
+    """
+    if not os.path.isfile(DB_PATH):
+        print("[!] No database found. Run at least one scan first.")
+        return
+    try:
+        with open(DB_PATH, "r", encoding="utf-8") as fh:
+            db = json.load(fh)
+    except Exception as exc:
+        print(f"[ERROR] Cannot read database: {exc}")
+        return
+
+    scans = db.get("scans", [])
+    if not scans:
+        print("[!] Database is empty.")
+        return
+
+    # company -> set of netlocs where it was seen tracking (after accept)
+    accept_sites:     dict[str, set] = defaultdict(set)
+    nc_sites:         dict[str, set] = defaultdict(set)   # non-compliant (active after reject)
+
+    for s in scans:
+        netloc = s.get("netloc", s.get("url", "?"))
+        for co in s.get("tracking_companies_accept", []):
+            accept_sites[co].add(netloc)
+        for co in s.get("non_compliant_companies", []):
+            nc_sites[co].add(netloc)
+
+    ranked = sorted(accept_sites.items(), key=lambda x: len(x[1]), reverse=True)
+
+    sep = "═" * 70
+    print(f"\n{sep}")
+    print(f"  CROSS-SITE TRACKER RANKING  –  {len(scans)} site(s) in database")
+    print(f"  Database: {DB_PATH}")
+    print(sep)
+    print(f"  {'#':<4} {'Company':<30} {'Sites (tracking)':<8}  {'GDPR violations (sites)'}")
+    print(f"  {'─'*4} {'─'*30} {'─'*8}  {'─'*28}")
+    for i, (company, sites) in enumerate(ranked[:top_n], 1):
+        nc = nc_sites.get(company, set())
+        sites_preview = ", ".join(sorted(sites)[:3]) + ("…" if len(sites) > 3 else "")
+        nc_str = f"🔴 {len(nc)} ({', '.join(sorted(nc)[:2])}{'…' if len(nc)>2 else ''})" if nc else "✅  –"
+        print(f"  {i:<4} {company:<30} {len(sites):<8}  {nc_str}")
+        print(f"       {'':30} {sites_preview}")
+    print(sep)
+    print(f"  Full data: {DB_PATH}\n")
+
+
 
 ACCEPT_SELECTORS = [
     # OneTrust / CookiePro
@@ -3526,6 +3653,7 @@ class CookieAnalyzer:
         self._print_report(analysis)
         self._save_json(analysis)
         self._generate_report_card(analysis)
+        _save_to_db(analysis)
         return analysis
 
 
@@ -3592,7 +3720,14 @@ def main():
     parser.add_argument("--binary", default=None)
     parser.add_argument("--list", metavar="FILE",
                         help="Path to a .txt file with one URL per line")
+    parser.add_argument("--report", action="store_true",
+                        help="Show cross-site company tracker ranking from database and exit")
     args, _unknown = parser.parse_known_args()
+
+    # ── Cross-site report mode ────────────────────────────────────────────────
+    if args.report:
+        _print_company_ranking()
+        sys.exit(0)
 
     # ── Build URL list ────────────────────────────────────────────────────────
     urls: list[str] = []
@@ -3688,6 +3823,9 @@ def main():
         with open(ranking_path, "w", encoding="utf-8") as fh:
             json.dump(batch_results, fh, indent=2, ensure_ascii=False)
         print(f"[+] Ranking saved: {ranking_path}")
+
+    # ── Always show cross-site company summary if DB has >=2 sites ───────────
+    _print_company_ranking()
 
 
 if __name__ == "__main__":
