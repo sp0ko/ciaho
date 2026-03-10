@@ -123,6 +123,18 @@ class CiahoGui(tk.Tk):
             cursor="hand2",
         ).pack(side="left", padx=(0, 8))
 
+        tk.Label(uf, text="Głębokość:", bg=C_SURFACE, fg=C_TEXT,
+                 font=("Segoe UI", 9)).pack(side="left")
+        self._crawl_depth = tk.IntVar(value=1)
+        tk.Spinbox(
+            uf, from_=1, to=5, width=2,
+            textvariable=self._crawl_depth,
+            font=("Segoe UI", 9),
+            bg=C_MANTLE, fg=C_TEXT,
+            buttonbackground=C_SURFACE,
+            relief="flat", bd=0,
+        ).pack(side="left", padx=(2, 12))
+
         self._btn = tk.Button(
             uf, text="▶  Analyze", command=self._go,
             font=("Segoe UI", 11, "bold"),
@@ -335,7 +347,8 @@ class CiahoGui(tk.Tk):
                          "output_dir": outdir, "result": None}
                 try:
                     analyzer = CookieAnalyzer(url, output_dir=outdir,
-                                              browser_type=btype, browser_binary=bbinary)
+                                              browser_type=btype, browser_binary=bbinary,
+                                              crawl_depth=self._crawl_depth.get())
                     result = analyzer.analyze()
                     ps = result.get("privacy_score", {})
                     entry["score"]     = ps.get("score")

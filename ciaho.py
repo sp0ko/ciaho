@@ -1080,11 +1080,13 @@ MANAGE_TEXT_PATTERNS = [
 
 class CookieAnalyzer:
     def __init__(self, url: str, output_dir: str = "output",
-                 browser_type: str = "chrome", browser_binary: str | None = None):
+                 browser_type: str = "chrome", browser_binary: str | None = None,
+                 crawl_depth: int = 1):
         self.url = self._normalize_url(url)
         self.output_dir = os.path.abspath(output_dir)
         self.browser_type = browser_type          # "chrome" | "firefox" | "edge"
         self.browser_binary = browser_binary
+        self.crawl_depth = max(1, min(int(crawl_depth), 5))  # 1–5 pages per scenario
         self.bmp_server: Server | None = None
         self.proxy = None
         os.makedirs(self.output_dir, exist_ok=True)
@@ -1832,6 +1834,99 @@ class CookieAnalyzer:
 
         return False
 
+    # ── Page interaction helpers ──────────────
+
+    def _simulate_page_interaction(self, driver, scroll_pause: float = 0.15) -> None:
+        """
+        Scroll the page gradually to trigger lazy-loaded trackers
+        (Intersection Observer, infinite scroll, ad slots), then simulate
+        mouse movement to activate hover-based and viewability trackers.
+        """
+        try:
+            total_height = driver.execute_script("return document.body.scrollHeight")
+        except Exception:
+            total_height = 3000
+
+        step = 350  # px per scroll step
+        current = 0
+        while current < total_height:
+            current = min(current + step, total_height)
+            try:
+                driver.execute_script(f"window.scrollTo(0, {current});")
+            except Exception:
+                break
+            time.sleep(scroll_pause)
+
+        # Brief pause at bottom, then scroll back (some sites fire scroll-up events)
+        time.sleep(0.4)
+        try:
+            driver.execute_script("window.scrollTo(0, 0);")
+        except Exception:
+            pass
+        time.sleep(0.3)
+
+        # Mouse movement — zigzag across the viewport to trigger hover trackers
+        try:
+            from selenium.webdriver.common.action_chains import ActionChains
+            body = driver.find_element(By.TAG_NAME, "body")
+            ac = ActionChains(driver)
+            for ox, oy in [(-700, -300), (0, -200), (600, -100),
+                           (-500, 100), (300, 200), (-200, 300)]:
+                try:
+                    ac.move_to_element_with_offset(body, ox, oy).pause(0.08)
+                except Exception:
+                    pass
+            ac.perform()
+        except Exception:
+            pass
+
+    def _extract_internal_links(self, driver, max_links: int = 3) -> list:
+        """Return up to max_links unique same-domain hrefs from current page."""
+        from urllib.parse import urlparse as _up
+        base_netloc = _up(self.url).netloc
+        seen: set = set()
+        links: list = []
+        try:
+            for a in driver.find_elements(By.TAG_NAME, "a"):
+                href = (a.get_attribute("href") or "").strip()
+                if not href or href.startswith(("#", "javascript", "mailto", "tel")):
+                    continue
+                parsed = _up(href)
+                if parsed.netloc != base_netloc:
+                    continue
+                path = parsed.path.rstrip("/")
+                if not path:
+                    continue
+                norm = f"{parsed.scheme}://{parsed.netloc}{path}"
+                if norm.rstrip("/") == self.url.rstrip("/"):
+                    continue
+                if norm not in seen:
+                    seen.add(norm)
+                    links.append(norm)
+                    if len(links) >= max_links:
+                        break
+        except Exception:
+            pass
+        return links
+
+    def _crawl_subpages(self, driver) -> None:
+        """Visit (crawl_depth - 1) internal pages to widen HAR coverage."""
+        n = self.crawl_depth - 1
+        if n < 1:
+            return
+        links = self._extract_internal_links(driver, max_links=n)
+        if not links:
+            print("    [~] No internal links found for subpage crawl")
+            return
+        for link in links:
+            print(f"    [~] Crawling subpage: {link}")
+            try:
+                driver.get(link)
+                time.sleep(2)
+                self._simulate_page_interaction(driver, scroll_pause=0.1)
+            except Exception as exc:
+                print(f"    [!] Subpage crawl error: {exc}")
+
     # ── Scenario capture ─────────────────────
 
     def _wait_network_idle(self, timeout: float = 20.0, idle_for: float = 2.0,
@@ -2026,8 +2121,14 @@ class CookieAnalyzer:
             # Resetting ensures we measure ONLY that differential traffic and not
             # the page's initial load or the consent-panel's own asset requests.
             self.proxy.new_har(self.url + "#post-consent", options=_har_opts)
-            print(f"    [~] HAR reset – waiting for network idle (max 15 s)...")
-            self._wait_network_idle(timeout=15.0, idle_for=2.0)
+            print(f"    [~] HAR reset – scrolling page (lazy-load trigger) + mouse simulation...")
+            self._simulate_page_interaction(driver)
+            if self.crawl_depth > 1:
+                print(f"    [~] Crawl depth {self.crawl_depth}: visiting subpages...")
+                self._crawl_subpages(driver)
+            print(f"    [~] Waiting for network idle (max 20 s)...")
+            # min_wait reduced to 5 s — scroll itself already takes ~3 s
+            self._wait_network_idle(timeout=20.0, idle_for=2.0, min_wait=5.0)
 
             result["html"] = driver.page_source
             all_cookies = driver.get_cookies()
@@ -2773,6 +2874,20 @@ class CookieAnalyzer:
         "adnxs.com", "adkernel.com",
     }
 
+    # Known advertising / header-bidding script name fragments.
+    # Checked against reject_external_scripts to catch ad libraries loaded
+    # despite consent being rejected.
+    _AD_SCRIPT_PATTERNS: tuple[str, ...] = (
+        "pbjs", "prebid",                        # Prebid.js (header bidding)
+        "googletag", "gpt.js", "adsbygoogle",   # Google Publisher Tags
+        "apstag.js", "amazon-apstag",            # Amazon Advertising
+        "criteo", "taboola", "outbrain",        # demand/content networks
+        "gemius", "gemhit",                      # Gemius (PL measurement)
+        "/adv/", "/ads/", "/ad.",               # generic ad paths
+        "doubleclick", "adsrvr",                 # DoubleClick / TTD
+        "smartadserver", "teads",               # other ad servers
+    )
+
     # JS APIs exploited by fingerprinting scripts
     _FP_JS_PATTERNS: list[str] = [
         "canvas.toblob", "canvas.todataurl",          # canvas FP
@@ -3028,6 +3143,59 @@ class CookieAnalyzer:
                     f"TCF requests (consent sync):    {rej_tcf}",
                     f"Requests after accepting:       {acc_reqs}",
                 ],
+            )
+
+        # ── HIGH: Tracking pixels active after reject ──────────────────────
+        html = analysis.get("html", {})
+        reject_pixels = html.get("reject_tracking_pixels", 0)
+        if reject_pixels > 0:
+            add(
+                "HIGH",
+                "Art. 6 GDPR",
+                "Tracking pixels active after rejecting consent",
+                (
+                    f"Detected {reject_pixels} tracking pixel(s) (1×1 or 0×0 px "
+                    "images) present in the page after consent was rejected. "
+                    "Tracking pixels typically transmit user identifiers to third-"
+                    "party servers without a valid legal basis, violating Art. 6 GDPR."
+                ),
+                [f"Tracking pixels counted in reject scenario: {reject_pixels}"],
+            )
+
+        # ── MEDIUM: Tracking pixels active on necessary-only ─────────────────
+        necessary_pixels = html.get("necessary_tracking_pixels", 0)
+        if necessary_pixels > 0:
+            add(
+                "MEDIUM",
+                "Art. 6 GDPR / Art. 5(1)(c) GDPR",
+                "Tracking pixels active on 'necessary-only' selection",
+                (
+                    f"Detected {necessary_pixels} tracking pixel(s) even when the "
+                    "user selected 'necessary cookies only'. Processing user data "
+                    "via tracking pixels without consent may violate Art. 6 GDPR."
+                ),
+                [f"Tracking pixels counted in necessary-only scenario: {necessary_pixels}"],
+            )
+
+        # ── HIGH: Known advertising scripts loaded after reject ───────────────
+        reject_scripts = html.get("reject_external_scripts", [])
+        ad_scripts_in_reject = [
+            s for s in reject_scripts
+            if any(pat in s.lower() for pat in self._AD_SCRIPT_PATTERNS)
+        ]
+        if ad_scripts_in_reject:
+            add(
+                "HIGH",
+                "Art. 6 & 7(3) GDPR",
+                "Known advertising/tracking scripts loaded after rejecting consent",
+                (
+                    f"Detected {len(ad_scripts_in_reject)} recognisable advertising "
+                    "or tracking script(s) still loaded after consent was rejected. "
+                    "Loading such scripts implies continued user tracking without a "
+                    "valid legal basis (Art. 6 GDPR) and disregard for withdrawal of "
+                    "consent (Art. 7(3) GDPR)."
+                ),
+                [s.split("?")[0][:120] for s in ad_scripts_in_reject[:10]],
             )
 
         counts = Counter(v["severity"] for v in violations)
@@ -3722,6 +3890,8 @@ def main():
                         help="Path to a .txt file with one URL per line")
     parser.add_argument("--report", action="store_true",
                         help="Show cross-site company tracker ranking from database and exit")
+    parser.add_argument("--crawl-depth", type=int, default=1, metavar="N",
+                        help="Pages to crawl per scenario: 1=homepage only, 2-3=follow internal links")
     args, _unknown = parser.parse_known_args()
 
     # ── Cross-site report mode ────────────────────────────────────────────────
@@ -3799,7 +3969,8 @@ def main():
         try:
             analyzer = CookieAnalyzer(website, output_dir=output_dir,
                                        browser_type=browser_type,
-                                       browser_binary=browser_binary)
+                                       browser_binary=browser_binary,
+                                       crawl_depth=args.crawl_depth)
             result = analyzer.analyze()
             ps = result.get("privacy_score", {})
             entry["score"]     = ps.get("score")
