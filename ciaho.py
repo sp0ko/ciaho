@@ -1214,6 +1214,13 @@ class CookieAnalyzer:
         options.add_argument(f"--proxy-server={self.proxy.proxy}")
         options.add_argument("--ignore-certificate-errors")
         options.add_argument("--allow-insecure-localhost")
+        # Disable QUIC (HTTP/3) and force HTTP/1.1 so BMP can intercept all HTTPS
+        # traffic.  Without these, Chrome uses QUIC/HTTP2 multiplexed connections
+        # that browsermob-proxy cannot decrypt, causing many tracker domains to be
+        # invisible in the captured HAR.
+        options.add_argument("--disable-quic")
+        options.add_argument("--disable-features=NetworkService,NetworkServiceInProcess")
+        options.add_argument("--enable-features=NetworkServiceInProcess2")
 
         ver = self._detect_browser_version()
         cached = self._find_cached_chromedriver(ver)
@@ -1238,6 +1245,8 @@ class CookieAnalyzer:
         options.add_argument("--window-size=1920,1080")
         options.add_argument(f"--proxy-server={self.proxy.proxy}")
         options.add_argument("--ignore-certificate-errors")
+        options.add_argument("--disable-quic")
+        options.add_argument("--disable-features=NetworkService,NetworkServiceInProcess")
         if HAS_WDM:
             service = EdgeService(EdgeChromiumDriverManager().install())
             driver = webdriver.Edge(service=service, options=options)
@@ -1269,6 +1278,10 @@ class CookieAnalyzer:
         options.set_preference("accept_untrusted_certs", True)
         options.set_preference("network.stricttransportsecurity.preloadlist", False)
         options.set_preference("security.cert_pinning.enforcement_level", 0)
+        # Disable QUIC/HTTP3 so BMP can intercept all connections over HTTP/1.1
+        options.set_preference("network.http.http3.enabled", False)
+        options.set_preference("network.http.spdy.enabled.http2", False)
+        options.set_preference("network.http.altsvc.enabled", False)
 
         # Prefer system geckodriver (avoids WDM version mismatch)
         gecko = subprocess.run(
@@ -2559,16 +2572,14 @@ class CookieAnalyzer:
         reject_tracking    = {d for d in reject_doms    if self._categorize_domain(d) in tracking_cats}
         necessary_tracking = {d for d in necessary_doms if self._categorize_domain(d) in tracking_cats}
 
-        # ── Point 7: use necessary-only as clean baseline ────────────────────
-        # Domains that appear in reject/accept but NOT in necessary are the
-        # ones truly enabled by consent.  Domains in necessary are always-on
-        # (CDN, fonts, etc.) and should not count as consent-triggered trackers.
-        necessary_set = set(necessary_doms.keys())
-        reject_tracking_above_baseline    = reject_tracking    - necessary_set
-        # Non-compliant = trackers active in reject/necessary BEYOND the baseline
-        non_compliant_in_reject    = sorted(
-            (reject_tracking - necessary_set) - (accept_tracking - necessary_set - reject_tracking)
-        )
+        # ── Point 7: use necessary_tracking as clean baseline ────────────────
+        # Trackers active in necessary-only are "always-on" regardless of consent
+        # choice.  We exclude them from non_compliant_in_reject to avoid false
+        # positives from truly essential services.
+        # We use necessary_TRACKING (only categorised tracking domains) not the
+        # full necessary domain set so that CDN/infra domains in necessary don't
+        # accidentally filter out tracker domains in reject.
+        non_compliant_in_reject    = sorted(reject_tracking - necessary_tracking)
         non_compliant_in_necessary = sorted(necessary_tracking)
 
         only_accept_doms    = sorted(set(accept_doms)    - set(reject_doms))
