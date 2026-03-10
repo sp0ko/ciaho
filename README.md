@@ -38,9 +38,13 @@ Captures real network traffic, detects GDPR violations, browser fingerprinting, 
 
 | Analysis tabs | Ranking |
 |---|---|
-| *(add your screenshots here)* | *(add your screenshots here)* |
+| |<img width="1236" height="581" alt="Zrzut ekranu z 2026-03-10 08-04-38" src="https://github.com/user-attachments/assets/5b34147b-0a3f-47f6-9617-0a923244ee8c" />
 
----
+<img width="1157" height="581" alt="Zrz<img width="779" height="387" alt="Zrzut ekranu z 2026-03-10 08-06-41" src="https://github.com/user-attachments/assets/5c04d1f0-bbbd-46fd-8c0d-e8dc94685b27" />
+ut ekranu z 2026-03-10 08-05-39" src="https://github.com/user-attachments/assets/242fb511-39c5-4d8e-9284-54443c25c055" />
+
+---<img width="779" height="905" alt="Zrzut ekranu z 2026-03-10 08-07-44" src="https://github.com/user-attachments/assets/072aa1af-7154-4215-9bba-86615b09f10a" />
+
 
 ## 🏗️ How it works
 
