@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+bmp.log
+server.log
+
+# Analysis output directories
+output_*/
+
+# Runtime cache
+.disconnect_cache.json
+*.cache.json
+
+# Private notes
+co_moge_zrobic_naruszenia_rodo.txt
+
+# OS
+.DS_Store
+Thumbs.db

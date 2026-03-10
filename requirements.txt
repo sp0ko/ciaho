@@ -1,0 +1,45 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Cookie Impact Analyzer – Python dependencies
+# Install: pip install -r requirements.txt
+# Python:  3.10+
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Core browser automation
+selenium>=4.15.0
+browsermob-proxy>=0.8.0
+
+# HTML parsing
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Charts
+matplotlib>=3.7.0
+
+# Browser driver management
+webdriver-manager>=4.0.0
+
+# HTTP (Disconnect.me tracking-protection list download)
+requests>=2.31.0
+
+# PDF report card
+reportlab>=4.0.0
+Pillow>=10.0.0          # required by reportlab for PNG chart embedding
+
+# Compatibility shim (Python < 3.11)
+typing-extensions>=4.0.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GUI (tkinter) – ships with Python stdlib, NOT installable via pip.
+# Install separately if missing:
+#   Linux (Debian/Ubuntu):  sudo apt install python3-tk
+#   macOS:                  included with python.org installer
+#   Windows:                included by default
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime requirements (NOT Python packages):
+#   Java 8+    – required by browsermob-proxy
+#                Linux: sudo apt install openjdk-17-jre
+#   geckodriver – required when Firefox is selected
+#                Linux: sudo apt install geckodriver
+# ─────────────────────────────────────────────────────────────────────────────
