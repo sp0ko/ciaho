@@ -111,6 +111,18 @@ class CiahoGui(tk.Tk):
         )
         self._loadbtn.pack(side="left", padx=(0, 4))
 
+        self._show_individual = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            uf, text="Per-site tabs",
+            variable=self._show_individual,
+            bg=C_SURFACE, fg=C_TEXT,
+            selectcolor=C_MANTLE,
+            activebackground=C_SURFACE,
+            font=("Segoe UI", 9),
+            relief="flat", bd=0,
+            cursor="hand2",
+        ).pack(side="left", padx=(0, 8))
+
         self._btn = tk.Button(
             uf, text="▶  Analyze", command=self._go,
             font=("Segoe UI", 11, "bold"),
@@ -379,7 +391,7 @@ class CiahoGui(tk.Tk):
         # Accumulate into session ranking history
         self._batch_results.extend(batch)
 
-        self._show(last_outdir, last_result, batch)
+        self._show(batch)
 
     def _done(self, outdir, result, error):
         """Legacy single-URL done handler – delegates to _done_batch."""
@@ -404,44 +416,338 @@ class CiahoGui(tk.Tk):
     #  Results panel
     # ════════════════════════════════════════
 
-    def _show(self, outdir: str, result: dict, batch: list | None = None):
+    def _show(self, batch: list[dict]):
+        """Rebuild the results notebook. Called on the main thread after analysis."""
         self._ph.pack_forget()
 
-        ct = tk.Frame(self._nb, bg=C_BASE)
-        self._nb.add(ct, text="  📊  Charts  ")
-        self._charts_tab(ct, outdir)
+        ok_batch = [e for e in batch if e.get("result")]
 
-        ps_t = tk.Frame(self._nb, bg=C_BASE)
-        self._nb.add(ps_t, text="  🔒  Privacy Score  ")
-        self._privacy_score_tab(ps_t, result)
+        if len(ok_batch) == 1:
+            # ── Single site: flat tab layout ──────────────────────────────────
+            entry = ok_batch[0]
+            self._build_site_tabs(self._nb, entry["result"], entry["output_dir"])
+            if self._batch_results:
+                rt = tk.Frame(self._nb, bg=C_BASE)
+                self._nb.add(rt, text="  🏆  Ranking  ")
+                self._ranking_tab(rt, self._batch_results)
 
-        st = tk.Frame(self._nb, bg=C_BASE)
-        self._nb.add(st, text="  📋  Summary  ")
-        self._summary_tab(st, result)
+        elif len(ok_batch) > 1:
+            # ── Multiple sites: combined overview (+optional per-site tabs) ───
+            ct = tk.Frame(self._nb, bg=C_BASE)
+            self._nb.add(ct, text="  📊  Porównanie  ")
+            self._combined_tab(ct, ok_batch)
 
-        cdt = tk.Frame(self._nb, bg=C_BASE)
-        self._nb.add(cdt, text="  🍪  Cookie Details  ")
-        self._cookie_details_tab(cdt, result)
+            if self._show_individual.get():
+                for entry in ok_batch:
+                    label = entry.get("url", "?")[:18]
+                    sf    = tk.Frame(self._nb, bg=C_BASE)
+                    self._nb.add(sf, text=f"  🌐 {label}  ")
+                    sub_nb = ttk.Notebook(sf)
+                    sub_nb.pack(fill="both", expand=True)
+                    self._build_site_tabs(sub_nb, entry["result"], entry["output_dir"])
 
-        gt = tk.Frame(self._nb, bg=C_BASE)
-        self._nb.add(gt, text="  🔴  GDPR  ")
-        self._gdpr_tab(gt, result.get("gdpr", {}))
+            if self._batch_results:
+                rt = tk.Frame(self._nb, bg=C_BASE)
+                self._nb.add(rt, text="  🏆  Ranking  ")
+                self._ranking_tab(rt, self._batch_results)
 
-        fpt = tk.Frame(self._nb, bg=C_BASE)
-        self._nb.add(fpt, text="  🖆  Fingerprinting  ")
-        self._fingerprinting_tab(fpt, result.get("fingerprinting", {}))
-
-        # Ranking tab – show cumulative session history
-        if self._batch_results:
-            rt = tk.Frame(self._nb, bg=C_BASE)
-            self._nb.add(rt, text="  🏆  Ranking  ")
-            self._ranking_tab(rt, self._batch_results)
-
-        jt = tk.Frame(self._nb, bg=C_BASE)
-        self._nb.add(jt, text="  { }  JSON  ")
-        self._json_tab(jt, result)
+        else:
+            # All failed
+            ef = tk.Frame(self._nb, bg=C_BASE)
+            self._nb.add(ef, text="  ❌  Errors  ")
+            for e in batch:
+                tk.Label(ef,
+                         text=f"❌ {e.get('url','?')}: {e.get('error','?')[:100]}",
+                         bg=C_BASE, fg=C_RED,
+                         font=("Segoe UI", 10)).pack(anchor="w", padx=16, pady=4)
 
         self._nb.pack(fill="both", expand=True)
+
+    def _build_site_tabs(self, nb: ttk.Notebook, r: dict, outdir: str):
+        """Populate a notebook with all standard per-site analysis tabs."""
+        for tab_text, builder in [
+            ("  📊  Charts  ",         lambda f: self._charts_tab(f, outdir)),
+            ("  🔒  Privacy Score  ",  lambda f: self._privacy_score_tab(f, r)),
+            ("  📋  Summary  ",        lambda f: self._summary_tab(f, r)),
+            ("  🍪  Cookie Details  ", lambda f: self._cookie_details_tab(f, r)),
+            ("  🔴  GDPR  ",           lambda f: self._gdpr_tab(f, r.get("gdpr", {}))),
+            ("  🖆  Fingerprinting  ", lambda f: self._fingerprinting_tab(f, r.get("fingerprinting", {}))),
+            ("  { }  JSON  ",          lambda f: self._json_tab(f, r)),
+        ]:
+            frame = tk.Frame(nb, bg=C_BASE)
+            nb.add(frame, text=tab_text)
+            builder(frame)
+
+    def _combined_tab(self, parent, batch: list[dict]):
+        """Combined overview: score cards, comparison chart, highlights, company ranking."""
+        _, inner = self._scrollable(parent, horiz=True)
+
+        GRADE_COLORS = {"A": C_GREEN, "B": C_GREEN, "C": C_YELLOW, "D": C_YELLOW, "F": C_RED}
+        RISK_COLORS  = {"HIGH": C_RED, "MEDIUM": C_YELLOW, "LOW": C_GREEN, "NONE": C_GREEN}
+
+        tk.Label(inner,
+                 text=f"Comparative analysis  –  {len(batch)} sites",
+                 bg=C_BASE, fg=C_MAUVE,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=16, pady=(12, 6))
+
+        # ── Score cards ───────────────────────────────────────────────────────
+        cards_row = tk.Frame(inner, bg=C_BASE)
+        cards_row.pack(fill="x", padx=16, pady=(0, 10))
+
+        for entry in batch:
+            r      = entry["result"]
+            ps     = r.get("privacy_score") or {}
+            score  = ps.get("score", 0) or 0
+            grade  = ps.get("grade", "?")
+            gdpr   = (r.get("gdpr") or {}).get("overall_risk", "NONE")
+            fp     = (r.get("fingerprinting") or {}).get("risk", "NONE")
+            netloc = entry.get("url", "?")
+            sc     = GRADE_COLORS.get(grade, C_TEXT)
+            rc     = RISK_COLORS.get(gdpr,  C_TEXT)
+            fpc    = RISK_COLORS.get(fp,    C_TEXT)
+
+            card = tk.Frame(cards_row, bg=C_SURFACE, padx=14, pady=10,
+                            highlightbackground=sc, highlightthickness=2)
+            card.pack(side="left", padx=6, pady=4, anchor="n")
+
+            tk.Label(card, text=netloc[:22],
+                     bg=C_SURFACE, fg=C_TEXT,
+                     font=("Segoe UI", 9, "bold")).pack()
+            tk.Label(card, text=str(score),
+                     bg=C_SURFACE, fg=sc,
+                     font=("Segoe UI", 30, "bold")).pack()
+            tk.Label(card, text=f"Grade: {grade}",
+                     bg=C_SURFACE, fg=sc,
+                     font=("Segoe UI", 10)).pack()
+            bar_outer = tk.Frame(card, bg=C_MANTLE, height=6, width=100)
+            bar_outer.pack(pady=(4, 2))
+            tk.Frame(bar_outer, bg=sc, height=6,
+                     width=max(2, score)).place(x=0, y=0)
+            tk.Label(card, text=f"GDPR: {gdpr}",
+                     bg=C_SURFACE, fg=rc,
+                     font=("Segoe UI", 8)).pack()
+            tk.Label(card, text=f"FP: {fp}",
+                     bg=C_SURFACE, fg=fpc,
+                     font=("Segoe UI", 8)).pack()
+
+        # ── Comparison chart ──────────────────────────────────────────────────
+        self._generate_combined_chart(inner, batch)
+
+        # ── Highlights ────────────────────────────────────────────────────────
+        scored = sorted(
+            [e for e in batch
+             if (e["result"].get("privacy_score") or {}).get("score") is not None],
+            key=lambda e: e["result"]["privacy_score"]["score"]
+        )
+        if len(scored) >= 2:
+            hl = tk.Frame(inner, bg=C_SURFACE, padx=16, pady=10)
+            hl.pack(fill="x", padx=16, pady=(4, 0))
+            tk.Label(hl, text="Highlights",
+                     bg=C_SURFACE, fg=C_MAUVE,
+                     font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 4))
+
+            for icon, entry, color in [
+                ("🏆 Most private: ",  scored[-1], C_GREEN),
+                ("⚠️  Least private:", scored[0],  C_RED),
+            ]:
+                ps_ = entry["result"].get("privacy_score") or {}
+                nc  = len(entry["result"].get("domains", {}).get("non_compliant_in_reject", []))
+                row = tk.Frame(hl, bg=C_SURFACE)
+                row.pack(fill="x", pady=2)
+                tk.Label(row, text=icon,
+                         bg=C_SURFACE, fg=C_OVERLAY,
+                         font=("Segoe UI", 9), width=22, anchor="w").pack(side="left")
+                tk.Label(row, text=entry.get("url", "?"),
+                         bg=C_SURFACE, fg=color,
+                         font=("Segoe UI", 10, "bold")).pack(side="left", padx=(0, 10))
+                tk.Label(row,
+                         text=f"score {ps_.get('score','?')}, grade {ps_.get('grade','?')}"
+                              + (f", {nc} non-compliant trackers" if nc else ""),
+                         bg=C_SURFACE, fg=C_OVERLAY,
+                         font=("Segoe UI", 9)).pack(side="left")
+
+            # Trackers active after REJECT across multiple tested sites
+            all_nc: dict = {}
+            for entry in batch:
+                for d in entry["result"].get("domains", {}).get("non_compliant_in_reject", []):
+                    all_nc.setdefault(d, []).append(entry.get("url", "?"))
+            multi_nc = {d: s for d, s in all_nc.items() if len(s) > 1}
+            if multi_nc:
+                tk.Frame(hl, bg=C_OVERLAY, height=1).pack(fill="x", pady=(8, 4))
+                tk.Label(hl,
+                         text=f"🔴  Trackers active after REJECT across multiple sites ({len(multi_nc)}x):",
+                         bg=C_SURFACE, fg=C_RED,
+                         font=("Segoe UI", 10, "bold")).pack(anchor="w")
+                for d, sites_ in sorted(multi_nc.items(), key=lambda x: -len(x[1]))[:10]:
+                    tk.Label(hl,
+                             text=f"   • {d}  →  {', '.join(sites_[:4])}",
+                             bg=C_SURFACE, fg=C_YELLOW,
+                             font=("Consolas", 9)).pack(anchor="w")
+
+        # ── Company ranking from persistent DB ────────────────────────────────
+        self._combined_company_section(inner)
+        tk.Frame(inner, bg=C_BASE, height=16).pack()
+
+    def _generate_combined_chart(self, parent, batch: list[dict]):
+        """Generate and embed a matplotlib comparison bar chart for all sites."""
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            sites   = [e.get("url", "?")[:18] for e in batch]
+            scores  = [(e["result"].get("privacy_score") or {}).get("score", 0) or 0
+                       for e in batch]
+            trk_acc = [e["result"].get("domains", {}).get("accept_tracking", 0) for e in batch]
+            trk_rej = [e["result"].get("domains", {}).get("reject_tracking",  0) for e in batch]
+            nc_cnt  = [len(e["result"].get("domains", {}).get("non_compliant_in_reject", []))
+                       for e in batch]
+
+            n, w   = len(sites), 0.22
+            x      = list(range(n))
+            fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(max(10, n * 2.2), 5))
+            fig.patch.set_facecolor("#1e1e2e")
+
+            for ax in (ax0, ax1):
+                ax.set_facecolor("#313244")
+                ax.tick_params(colors="#cdd6f4", labelsize=8)
+                for spine in ax.spines.values():
+                    spine.set_color("#45475a")
+                ax.grid(axis="y", color="#45475a", alpha=0.3)
+
+            # Left: Privacy scores
+            bar_colors = [
+                "#a6e3a1" if s >= 75 else "#f9e2af" if s >= 50 else "#f38ba8"
+                for s in scores
+            ]
+            bars = ax0.bar(x, scores, color=bar_colors, alpha=0.9, zorder=2)
+            ax0.set_xticks(x)
+            ax0.set_xticklabels(sites, rotation=20, ha="right", fontsize=8, color="#cdd6f4")
+            ax0.set_ylim(0, 115)
+            ax0.set_title("Privacy Score", color="#cba6f7", fontsize=10, pad=8)
+            ax0.set_ylabel("Score", color="#cdd6f4", fontsize=8)
+            ax0.tick_params(axis="y", colors="#45475a")
+            ax0.axhline(75, color="#a6e3a1", ls="--", alpha=0.4, lw=0.8)
+            ax0.axhline(50, color="#f9e2af", ls="--", alpha=0.4, lw=0.8)
+            for bar, s in zip(bars, scores):
+                ax0.annotate(str(s),
+                             xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                             xytext=(0, 3), textcoords="offset points",
+                             ha="center", va="bottom", fontsize=9, color="#cdd6f4")
+
+            # Right: Tracker comparison
+            ax1.bar([i - w for i in x], trk_acc, w,
+                    label="Trackers (accept)", color="#f38ba8", alpha=0.85)
+            ax1.bar(x,                         trk_rej, w,
+                    label="Trackers (reject)", color="#89dceb", alpha=0.85)
+            ax1.bar([i + w for i in x],        nc_cnt,  w,
+                    label="Non-compliant",     color="#f9e2af", alpha=0.85)
+            ax1.set_xticks(x)
+            ax1.set_xticklabels(sites, rotation=20, ha="right", fontsize=8, color="#cdd6f4")
+            ax1.set_title("Tracker comparison", color="#cba6f7", fontsize=10, pad=8)
+            ax1.set_ylabel("Count", color="#cdd6f4", fontsize=8)
+            ax1.tick_params(axis="y", colors="#45475a")
+            ax1.legend(fontsize=7, facecolor="#313244",
+                       labelcolor="#cdd6f4", edgecolor="#45475a")
+
+            plt.tight_layout(pad=2.0)
+            chart_path = os.path.join(_DIR, "_combined_chart.png")
+            plt.savefig(chart_path, dpi=90, bbox_inches="tight", facecolor="#1e1e2e")
+            plt.close()
+
+            img = tk.PhotoImage(file=chart_path)
+            lf  = tk.LabelFrame(parent, text="  Comparative charts  ",
+                                bg=C_SURFACE, fg=C_MAUVE,
+                                font=("Segoe UI", 10, "bold"),
+                                relief="flat", bd=1)
+            lf.pack(fill="x", padx=14, pady=(4, 8), anchor="nw")
+            lbl = tk.Label(lf, image=img, bg=C_SURFACE)
+            lbl.image = img
+            lbl.pack(padx=4, pady=6)
+
+        except Exception as exc:
+            tk.Label(parent,
+                     text=f"[Chart generation error: {exc}]",
+                     bg=C_BASE, fg=C_RED,
+                     font=("Segoe UI", 9)).pack(padx=16, pady=4)
+
+    def _combined_company_section(self, parent):
+        """Show top tracking companies read from ciaho_db.json (cross-site DB)."""
+        try:
+            from ciaho import DB_PATH as _db_path
+        except Exception:
+            _db_path = os.path.join(_DIR, "ciaho_db.json")
+
+        if not os.path.isfile(_db_path):
+            return
+        try:
+            with open(_db_path, "r", encoding="utf-8") as fh:
+                db = json.load(fh)
+        except Exception:
+            return
+
+        scans = db.get("scans", [])
+        if len(scans) < 2:
+            return
+
+        from collections import defaultdict
+        accept_sites: dict = defaultdict(set)
+        nc_sites:     dict = defaultdict(set)
+        for s in scans:
+            netloc = s.get("netloc", s.get("url", "?"))
+            for co in s.get("tracking_companies_accept", []):
+                accept_sites[co].add(netloc)
+            for co in s.get("non_compliant_companies", []):
+                nc_sites[co].add(netloc)
+
+        ranked = sorted(accept_sites.items(), key=lambda x: -len(x[1]))[:15]
+        if not ranked:
+            return
+
+        tf = tk.Frame(parent, bg=C_SURFACE, padx=16, pady=12)
+        tf.pack(fill="x", padx=16, pady=(4, 0))
+        tk.Label(tf,
+                 text=f"🏭  Top tracking companies across all sites  ({len(scans)} sites in DB)",
+                 bg=C_SURFACE, fg=C_MAUVE,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 6))
+
+        hdr = tk.Frame(tf, bg=C_SURFACE)
+        hdr.pack(fill="x")
+        for col_text, col_w, col_anchor in [
+            ("#",                  3,  "center"),
+            ("Company",            30, "w"),
+            ("Sites tracked",      14, "center"),
+            ("GDPR non-compliant", 22, "w"),
+        ]:
+            tk.Label(hdr, text=col_text,
+                     bg=C_SURFACE, fg=C_OVERLAY,
+                     font=("Segoe UI", 9, "bold"),
+                     width=col_w, anchor=col_anchor).pack(side="left", padx=3)
+        tk.Frame(tf, bg=C_OVERLAY, height=1).pack(fill="x", pady=(2, 4))
+
+        for i, (company, sites) in enumerate(ranked, 1):
+            nc  = nc_sites.get(company, set())
+            bg  = C_MANTLE if i % 2 == 0 else C_SURFACE
+            row = tk.Frame(tf, bg=bg)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=str(i),
+                     bg=bg, fg=C_OVERLAY,
+                     font=("Consolas", 9), width=3,
+                     anchor="center").pack(side="left", padx=3)
+            tk.Label(row, text=company[:30],
+                     bg=bg, fg=C_TEXT,
+                     font=("Segoe UI", 9, "bold"),
+                     width=30, anchor="w").pack(side="left", padx=3)
+            tk.Label(row, text=str(len(sites)),
+                     bg=bg, fg=C_CYAN,
+                     font=("Consolas", 10, "bold"),
+                     width=14, anchor="center").pack(side="left", padx=3)
+            nc_text = f"🔴 {len(nc)} site(s)" if nc else "✅  –"
+            nc_col  = C_RED if nc else C_GREEN
+            tk.Label(row, text=nc_text,
+                     bg=bg, fg=nc_col,
+                     font=("Segoe UI", 9),
+                     anchor="w").pack(side="left", padx=3)
 
     # ── scrollable helper ────────────────────
     def _scrollable(self, parent, horiz: bool = False):
