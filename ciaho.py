@@ -278,14 +278,6 @@ from selenium.webdriver.firefox.service import Service as FirefoxService
 from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import (
-    TimeoutException,
-    NoSuchElementException,
-    ElementClickInterceptedException,
-    WebDriverException,
-)
 
 try:
     from webdriver_manager.chrome import ChromeDriverManager
@@ -966,8 +958,6 @@ class CookieAnalyzer:
         self.output_dir = os.path.abspath(output_dir)
         self.browser_type = browser_type          # "chrome" | "firefox" | "edge"
         self.browser_binary = browser_binary
-        # keep chrome_binary as alias for compatibility
-        self.chrome_binary = browser_binary if browser_type == "chrome" else None
         self.bmp_server: Server | None = None
         self.proxy = None
         os.makedirs(self.output_dir, exist_ok=True)
@@ -2146,6 +2136,9 @@ class CookieAnalyzer:
                 # Tracking domains active despite reject/necessary: potential non-compliance
                 "non_compliant_in_reject":    non_compliant_in_reject,
                 "non_compliant_in_necessary": non_compliant_in_necessary,
+                "accept_list":        sorted(accept_doms.keys()),
+                "reject_list":        sorted(reject_doms.keys()),
+                "necessary_list":     sorted(necessary_doms.keys()),
                 "accept_categories":    {k: sorted(v) for k, v in accept_cats.items()},
                 "reject_categories":    {k: sorted(v) for k, v in reject_cats.items()},
                 "necessary_categories": {k: sorted(v) for k, v in necessary_cats.items()},
@@ -2948,8 +2941,7 @@ class CookieAnalyzer:
         )
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-        from reportlab.graphics.shapes import Drawing, Rect, String, Circle
-        from reportlab.graphics import renderPDF
+
 
         # ── palette (Catppuccin Mocha-ish) ────────────────────────────────────
         BG       = HexColor("#1e1e2e")
@@ -2983,15 +2975,6 @@ class CookieAnalyzer:
             base = styles["Normal"]
             return ParagraphStyle(name, parent=base, **kw)
 
-        st_h1 = S("H1", fontSize=22, textColor=TEXT,     leading=26, spaceAfter=2)
-        st_h2 = S("H2", fontSize=13, textColor=MAUVE,    leading=16, spaceBefore=6, spaceAfter=2, fontName="Helvetica-Bold")
-        st_h3 = S("H3", fontSize=10, textColor=CYAN,     leading=13, fontName="Helvetica-Bold")
-        st_body= S("Body", fontSize=8.5, textColor=TEXT,  leading=12)
-        st_small=S("Small",fontSize=7.5,textColor=OVERLAY,leading=10)
-        st_c   = S("Centered", fontSize=8.5, textColor=TEXT, alignment=TA_CENTER)
-        st_r   = S("Right",    fontSize=8.5, textColor=TEXT, alignment=TA_RIGHT)
-        st_label = S("Label", fontSize=7, textColor=OVERLAY, leading=9)
-
         story = []
 
         # ─────────────────────────────────────────────────────────────────────
@@ -3003,24 +2986,6 @@ class CookieAnalyzer:
                 width="100%", thickness=thickness,
                 color=color, spaceAfter=space_after, spaceBefore=space_before,
             ))
-
-        def coloured_cell(text, bg, fg=white, fontsize=8, bold=False):
-            fn = "Helvetica-Bold" if bold else "Helvetica"
-            return Paragraph(
-                f'<font name="{fn}" size="{fontsize}" color="#{fg.hexval()}">{text}</font>',
-                ParagraphStyle("cc", alignment=TA_CENTER, backColor=bg,
-                                leading=fontsize + 3),
-            )
-
-        def badge(text, bg, fg=white, w=60, h=16):
-            d = Drawing(w, h)
-            r = Rect(0, 0, w, h, fillColor=bg, strokeColor=None,
-                     rx=3, ry=3)
-            d.add(r)
-            d.add(String(w / 2, 4, text, fontSize=8,
-                         fillColor=fg, textAnchor="middle",
-                         fontName="Helvetica-Bold"))
-            return d
 
         def stat_cell(label, value, color=BLUE):
             """Create a 2-row table cell: large coloured number + small label."""
@@ -3257,7 +3222,6 @@ class CookieAnalyzer:
                          ]))
 
         # Pie chart PNG (right column)
-        mid_row_cells = []
         pie_path = os.path.join(self.output_dir, "domain_categories.png")
         mid_col_w = content_w * 0.45
 
